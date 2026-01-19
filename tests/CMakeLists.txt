@@ -54,7 +54,7 @@ if(LWM2M_BUILD_INTEGRATION_TESTS)
 
     target_link_libraries(lwm2m_integration_tests
         PRIVATE
-            lwm2m-cpp-client
+            lwm2m
             GTest::gtest
             GTest::gtest_main
             ${CURL_LIBRARIES}

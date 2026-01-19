@@ -1,5 +1,5 @@
 # Build directories
-build/
+build*/
 cmake-build-*/
 out/
 
@@ -9,6 +9,9 @@ out/
 *.swp
 *.swo
 *~
+
+# Assistant / local tooling
+.claude/
 
 # CMake
 CMakeFiles/
@@ -46,6 +49,13 @@ Thumbs.db
 # Logs
 *.log
 
+# Local env (publish .env.example instead)
+.env
+
 # Coredumps
 core
 core.*
+
+# Only README.md is published (CHANGELOG / BACKLOG / CLAUDE stay local)
+*.md
+!README.md

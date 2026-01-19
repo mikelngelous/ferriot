@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.12)
 
 project(ferriot
     VERSION 1.0.0
@@ -28,6 +28,9 @@ include(CompilerWarnings)
 # Dependencies (libcoap, OpenSSL, GoogleTest)
 include(Dependencies)
 
+# Threads support (required for std::thread)
+find_package(Threads REQUIRED)
+
 # Main library
 add_library(lwm2m
     src/types.cpp
@@ -38,6 +41,9 @@ add_library(lwm2m
     src/objects/security.cpp
     src/objects/server.cpp
     src/objects/device.cpp
+    src/objects/location.cpp
+    src/objects/firmware_update.cpp
+    src/objects/connectivity.cpp
     src/client.cpp
 )
 
@@ -55,6 +61,7 @@ target_link_libraries(lwm2m
         coap-3
         OpenSSL::SSL
         OpenSSL::Crypto
+        Threads::Threads
 )
 
 # Apply warnings to our library
