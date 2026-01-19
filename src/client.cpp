@@ -4,6 +4,8 @@
 #include "lwm2m/objects/security.hpp"
 #include "lwm2m/objects/server.hpp"
 #include "lwm2m/objects/device.hpp"
+#include "lwm2m/objects/connectivity.hpp"
+#include "lwm2m/objects/firmware_update.hpp"
 #include "lwm2m/codec/tlv.hpp"
 
 #include <sstream>
@@ -15,11 +17,15 @@ Client::Client(ClientConfig config)
     , security_(std::make_shared<objects::SecurityObject>())
     , server_(std::make_shared<objects::ServerObject>())
     , device_(std::make_shared<objects::DeviceObject>())
+    , connectivity_(std::make_shared<objects::ConnectivityObject>())
+    , firmware_update_(std::make_shared<objects::FirmwareUpdateObject>())
 {
     // Register mandatory objects
     add_object(security_);
     add_object(server_);
     add_object(device_);
+    add_object(connectivity_);
+    add_object(firmware_update_);
 
     // Set up registration update callback
     server_->set_registration_update_callback([this](uint16_t ssid) {
@@ -60,6 +66,14 @@ objects::DeviceObject& Client::device() {
     return *device_;
 }
 
+objects::ConnectivityObject& Client::connectivity() {
+    return *connectivity_;
+}
+
+objects::FirmwareUpdateObject& Client::firmware_update() {
+    return *firmware_update_;
+}
+
 Result<void> Client::start() {
     if (running_.load()) {
         return Err<void>(ErrorCode::InvalidState, "Client already running");
@@ -88,7 +102,7 @@ void Client::stop() {
         std::lock_guard<std::recursive_mutex> lock(mtx_);
         for (const auto& [ssid, reg] : registrations_) {
             ssids.push_back(ssid);
-            (void)reg;  // Silence unused warning
+            (void)reg;
         }
     }
 
@@ -102,7 +116,7 @@ void Client::stop() {
         std::lock_guard<std::recursive_mutex> lock(mtx_);
         for (auto& [id, conn] : connections_) {
             conn->disconnect();
-            (void)id;  // Silence unused warning
+            (void)id;
         }
         connections_.clear();
         registrations_.clear();
@@ -118,13 +132,11 @@ bool Client::is_running() const noexcept {
 Result<void> Client::register_with_server(uint16_t short_server_id) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
 
-    // Find security instance for this server
     auto sec_inst = security_->find_by_short_server_id(short_server_id);
     if (!sec_inst) {
         return Err<void>(ErrorCode::NotFound, "No security instance for server");
     }
 
-    // Find server instance
     auto srv_inst = server_->find_by_short_server_id(short_server_id);
     if (!srv_inst) {
         return Err<void>(ErrorCode::NotFound, "No server instance for server");
@@ -161,10 +173,8 @@ Result<void> Client::register_with_server(uint16_t short_server_id) {
 
     set_state(ClientState::Registering);
 
-    // Build registration payload
     std::string payload = build_registration_payload();
 
-    // Send registration request
     transport::CoapRequest request;
     request.method = transport::CoapMethod::Post;
     request.uri_path = "/rd?ep=" + config_.endpoint_name +
@@ -238,7 +248,6 @@ Result<void> Client::update_registration(uint16_t short_server_id) {
         return Err<void>(ErrorCode::BadRequest, "Update failed");
     }
 
-    // Update expiration
     auto srv_inst = server_->find_by_short_server_id(short_server_id);
     if (srv_inst) {
         it->second.expires_at = std::chrono::system_clock::now() +
@@ -282,12 +291,11 @@ void Client::poll() {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     for (auto& [id, conn] : connections_) {
         conn->poll(config_.poll_interval);
-        (void)id;  // Silence unused warning
+        (void)id;
     }
 
     check_registration_updates();
 
-    // Check connection health (detect lost connections)
     check_connection_health();
 
     // Handle reconnection if in progress and backoff time has passed
@@ -320,7 +328,7 @@ std::vector<uint16_t> Client::registered_servers() const {
     result.reserve(registrations_.size());
     for (const auto& [ssid, reg] : registrations_) {
         result.push_back(ssid);
-        (void)reg;  // Silence unused warning
+        (void)reg;
     }
     return result;
 }
@@ -383,13 +391,11 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
 transport::CoapResponse Client::process_read(const ObjectPath& path) {
     transport::CoapResponse response;
 
-    // Debug logging
     fprintf(stderr, "DEBUG: process_read called for path: /%u/%u/%u\n",
             path.object_id.value,
             path.instance_id ? path.instance_id->value : 999,
             path.resource_id ? path.resource_id->value : 999);
 
-    // Find object by ID
     Object* obj = get_object(path.object_id);
     if (!obj) {
         fprintf(stderr, "DEBUG: Object %u not found\n", path.object_id.value);
@@ -744,7 +750,6 @@ void Client::check_connection_health() {
 
     // Check each registration for expiration
     for (auto& [ssid, reg] : registrations_) {
-        // If registration has expired, trigger reconnection
         if (now > reg.expires_at) {
             handle_connection_lost(ssid);
             return;  // Only handle one at a time
@@ -804,7 +809,6 @@ void Client::try_reconnect(uint16_t ssid) {
 
     ++reconnect_attempts_;
 
-    // Notify reconnecting callback
     if (callbacks_.on_reconnecting) {
         callbacks_.on_reconnecting(ssid, reconnect_attempts_);
     }
@@ -824,7 +828,6 @@ void Client::try_reconnect(uint16_t ssid) {
         reconnecting_ = false;
         reconnect_attempts_ = 0;
 
-        // Notify reconnected callback
         if (callbacks_.on_reconnected) {
             callbacks_.on_reconnected(ssid);
         }

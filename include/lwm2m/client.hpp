@@ -25,6 +25,8 @@ namespace objects {
     class SecurityObject;
     class ServerObject;
     class DeviceObject;
+    class ConnectivityObject;
+    class FirmwareUpdateObject;
 }
 
 // Client state
@@ -104,6 +106,8 @@ public:
     [[nodiscard]] objects::SecurityObject& security();
     [[nodiscard]] objects::ServerObject& server();
     [[nodiscard]] objects::DeviceObject& device();
+    [[nodiscard]] objects::ConnectivityObject& connectivity();
+    [[nodiscard]] objects::FirmwareUpdateObject& firmware_update();
 
     // Lifecycle
     [[nodiscard]] Result<void> start();
@@ -165,6 +169,8 @@ private:
     std::shared_ptr<objects::SecurityObject> security_;
     std::shared_ptr<objects::ServerObject> server_;
     std::shared_ptr<objects::DeviceObject> device_;
+    std::shared_ptr<objects::ConnectivityObject> connectivity_;
+    std::shared_ptr<objects::FirmwareUpdateObject> firmware_update_;
 
     std::atomic<ClientState> state_{ClientState::Idle};
     std::atomic<bool> running_{false};

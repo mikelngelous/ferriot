@@ -1,0 +1,34 @@
+services:
+  leshan-server:
+    build:
+      context: ./leshan
+      dockerfile: Dockerfile
+    image: ferriot/leshan:latest
+    container_name: leshan-lwm2m-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"       # REST API / Web UI
+      - "5683:5683/udp"   # CoAP (NoSec)
+      - "5684:5684/udp"   # CoAPS (DTLS-PSK)
+    environment:
+      - JAVA_OPTS=-Xmx256m -Xms128m
+    volumes:
+      - ../logs/leshan:/var/log/leshan
+      - ./leshan/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/clients"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - lwm2m-net
+
+networks:
+  lwm2m-net:
+    driver: bridge
