@@ -95,33 +95,26 @@ std::vector<uint8_t> TlvEncoder::encode_record(
         type_byte |= 0x20;
     }
 
-    // Length encoding
+    // Determine length encoding and set bits 4-3 in type byte
     size_t len = value.size();
     if (len < 8) {
         // Inline length (bits 2-0)
         type_byte |= static_cast<uint8_t>(len & 0x07);
-        result.push_back(type_byte);
     } else if (len < 256) {
-        // 8-bit length
+        // 8-bit length field
         type_byte |= 0x08;
-        result.push_back(type_byte);
-        result.push_back(static_cast<uint8_t>(len));
     } else if (len < 65536) {
-        // 16-bit length
+        // 16-bit length field
         type_byte |= 0x10;
-        result.push_back(type_byte);
-        result.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
-        result.push_back(static_cast<uint8_t>(len & 0xFF));
     } else {
-        // 24-bit length
+        // 24-bit length field
         type_byte |= 0x18;
-        result.push_back(type_byte);
-        result.push_back(static_cast<uint8_t>((len >> 16) & 0xFF));
-        result.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
-        result.push_back(static_cast<uint8_t>(len & 0xFF));
     }
 
-    // ID
+    // Write type byte
+    result.push_back(type_byte);
+
+    // Write ID (MUST come before length per OMA LWM2M TLV spec)
     if (id_16bit) {
         result.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
         result.push_back(static_cast<uint8_t>(id & 0xFF));
@@ -129,7 +122,19 @@ std::vector<uint8_t> TlvEncoder::encode_record(
         result.push_back(static_cast<uint8_t>(id));
     }
 
-    // Value
+    // Write length field (if not inline)
+    if (len >= 8 && len < 256) {
+        result.push_back(static_cast<uint8_t>(len));
+    } else if (len >= 256 && len < 65536) {
+        result.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+        result.push_back(static_cast<uint8_t>(len & 0xFF));
+    } else if (len >= 65536) {
+        result.push_back(static_cast<uint8_t>((len >> 16) & 0xFF));
+        result.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+        result.push_back(static_cast<uint8_t>(len & 0xFF));
+    }
+
+    // Write value
     result.insert(result.end(), value.begin(), value.end());
 
     return result;
@@ -272,8 +277,24 @@ Result<std::pair<TlvRecord, size_t>> TlvDecoder::parse_record(const uint8_t* dat
 
     // Length type (bits 4-3)
     uint8_t length_type = (type_byte >> 3) & 0x03;
-    size_t value_length = 0;
 
+    // Parse ID first (per OMA LWM2M TLV spec: Type, ID, Length, Value)
+    uint16_t id = 0;
+    if (id_16bit) {
+        if (pos + 1 >= len) {
+            return Err<std::pair<TlvRecord, size_t>>(ErrorCode::DecodingError, "Truncated TLV");
+        }
+        id = static_cast<uint16_t>((static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1]);
+        pos += 2;
+    } else {
+        if (pos >= len) {
+            return Err<std::pair<TlvRecord, size_t>>(ErrorCode::DecodingError, "Truncated TLV");
+        }
+        id = data[pos++];
+    }
+
+    // Parse length field (comes after ID)
+    size_t value_length = 0;
     if (length_type == 0) {
         // Inline length (bits 2-0)
         value_length = type_byte & 0x07;
@@ -299,21 +320,6 @@ Result<std::pair<TlvRecord, size_t>> TlvDecoder::parse_record(const uint8_t* dat
                        (static_cast<size_t>(data[pos + 1]) << 8) |
                        data[pos + 2];
         pos += 3;
-    }
-
-    // Parse ID
-    uint16_t id = 0;
-    if (id_16bit) {
-        if (pos + 1 >= len) {
-            return Err<std::pair<TlvRecord, size_t>>(ErrorCode::DecodingError, "Truncated TLV");
-        }
-        id = static_cast<uint16_t>((static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1]);
-        pos += 2;
-    } else {
-        if (pos >= len) {
-            return Err<std::pair<TlvRecord, size_t>>(ErrorCode::DecodingError, "Truncated TLV");
-        }
-        id = data[pos++];
     }
 
     // Extract value

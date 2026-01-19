@@ -16,6 +16,14 @@ Result<void> Object::execute_resource(InstanceId, ResourceId, std::string_view) 
     return Err<void>(ErrorCode::MethodNotAllowed, "Resource is not executable");
 }
 
+std::optional<ResourceType> Object::get_resource_type(InstanceId /*iid*/, ResourceId rid) const {
+    const Resource* res = find_resource(rid);
+    if (res) {
+        return res->type();
+    }
+    return std::nullopt;
+}
+
 Result<void> Object::begin_transaction() {
     return Ok();
 }

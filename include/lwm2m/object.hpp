@@ -35,6 +35,10 @@ public:
     // Resource access
     [[nodiscard]] virtual std::vector<ResourceId> list_resources(InstanceId iid) const = 0;
 
+    // Get resource type for TLV decoding
+    [[nodiscard]] virtual std::optional<ResourceType> get_resource_type(
+        InstanceId iid, ResourceId rid) const;
+
     [[nodiscard]] virtual Result<ResourceValue> read_resource(
         InstanceId iid,
         ResourceId rid,

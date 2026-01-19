@@ -77,12 +77,31 @@ struct CoapRequest {
 // CoAP response
 struct CoapResponse {
     CoapCode code;
+    ContentFormat content_format = ContentFormat::TlvLwm2m;  // Default to TLV
     std::vector<std::pair<uint16_t, std::vector<uint8_t>>> options;
     std::vector<uint8_t> payload;
 
     [[nodiscard]] bool is_success() const noexcept {
         auto c = static_cast<uint8_t>(code);
         return c >= 64 && c < 128;  // 2.xx codes
+    }
+
+    // Extract Location-Path from options (CoAP option 8)
+    // Used to get registration location after successful registration
+    [[nodiscard]] std::string get_location_path() const {
+        std::string location;
+        for (const auto& [option_num, value] : options) {
+            if (option_num == 8) {  // COAP_OPTION_LOCATION_PATH
+                if (!location.empty()) {
+                    location += "/";
+                }
+                location += std::string(
+                    reinterpret_cast<const char*>(value.data()),
+                    value.size()
+                );
+            }
+        }
+        return location.empty() ? location : "/" + location;
     }
 };
 

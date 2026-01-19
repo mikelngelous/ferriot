@@ -58,6 +58,24 @@ std::vector<ResourceId> ServerObject::list_resources(InstanceId /* iid */) const
     };
 }
 
+std::optional<ResourceType> ServerObject::get_resource_type(
+    [[maybe_unused]] InstanceId iid, ResourceId rid) const {
+    switch (rid.value) {
+        case 0:  // Short Server ID
+        case 1:  // Lifetime
+        case 2:  // Default Minimum Period
+        case 3:  // Default Maximum Period
+        case 5:  // Disable Timeout
+            return ResourceType::Integer;
+        case 6:  // Notification Storing
+            return ResourceType::Boolean;
+        case 7:  // Binding
+            return ResourceType::String;
+        default:
+            return std::nullopt;  // Executable resources (4, 8, 9) have no type
+    }
+}
+
 Result<ResourceValue> ServerObject::read_resource(
     InstanceId iid,
     ResourceId rid,

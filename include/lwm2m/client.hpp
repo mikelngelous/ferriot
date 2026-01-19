@@ -139,11 +139,16 @@ public:
 private:
     // Internal methods
     void run_event_loop();
-    void handle_incoming_request(const transport::CoapRequest& request);
+    [[nodiscard]] transport::CoapResponse handle_incoming_request(const transport::CoapRequest& request);
     transport::CoapResponse process_read(const ObjectPath& path);
     transport::CoapResponse process_write(const ObjectPath& path, const std::vector<uint8_t>& payload);
     transport::CoapResponse process_execute(const ObjectPath& path, const std::vector<uint8_t>& payload);
     transport::CoapResponse process_discover(const ObjectPath& path);
+    transport::CoapResponse process_delete(const ObjectPath& path);
+
+    // Helper methods
+    [[nodiscard]] static transport::CoapCode error_to_coap_code(ErrorCode code) noexcept;
+    [[nodiscard]] std::vector<uint8_t> encode_instance_tlv(Object* obj, InstanceId iid) const;
 
     void set_state(ClientState new_state);
     void check_registration_updates();

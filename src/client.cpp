@@ -82,19 +82,31 @@ void Client::stop() {
     }
     event_thread_.reset();
 
+    // Collect SSIDs first to avoid modifying container while iterating
+    std::vector<uint16_t> ssids;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        for (const auto& [ssid, reg] : registrations_) {
+            ssids.push_back(ssid);
+            (void)reg;  // Silence unused warning
+        }
+    }
+
     // Deregister from all servers
-    for (auto& [ssid, reg] : registrations_) {
+    for (auto ssid : ssids) {
         (void)deregister(ssid);
-        (void)reg;  // Silence unused warning
     }
 
     // Disconnect all connections
-    for (auto& [id, conn] : connections_) {
-        conn->disconnect();
-        (void)id;  // Silence unused warning
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        for (auto& [id, conn] : connections_) {
+            conn->disconnect();
+            (void)id;  // Silence unused warning
+        }
+        connections_.clear();
+        registrations_.clear();
     }
-    connections_.clear();
-    registrations_.clear();
 
     set_state(ClientState::Idle);
 }
@@ -139,12 +151,9 @@ Result<void> Client::register_with_server(uint16_t short_server_id) {
                             std::string(res.error().message()));
         }
 
-        // Set request handler
+        // Set request handler - forward incoming requests from server to our handler
         conn->set_request_handler([this](const transport::CoapRequest& req) {
-            handle_incoming_request(req);
-            transport::CoapResponse resp;
-            resp.code = transport::CoapCode::Content;
-            return resp;
+            return handle_incoming_request(req);
         });
 
         connections_[short_server_id] = std::move(conn);
@@ -178,9 +187,16 @@ Result<void> Client::register_with_server(uint16_t short_server_id) {
         return Err<void>(ErrorCode::BadRequest, "Registration rejected by server");
     }
 
-    // Parse location from response
+    // Parse location from response Location-Path options
+    std::string location = response.value().get_location_path();
+    if (location.empty()) {
+        set_state(ClientState::Error);
+        return Err<void>(ErrorCode::BadRequest,
+            "Server did not return Location-Path in registration response");
+    }
+
     Registration reg;
-    reg.location = "/rd/placeholder";  // TODO: Parse from Location-Path option
+    reg.location = std::move(location);
     reg.short_server_id = short_server_id;
     reg.registered_at = std::chrono::system_clock::now();
     reg.expires_at = std::chrono::system_clock::now() +
@@ -320,42 +336,351 @@ void Client::run_event_loop() {
     }
 }
 
-void Client::handle_incoming_request(const transport::CoapRequest& /* request */) {
-    // TODO: Implement request handling
+transport::CoapResponse Client::handle_incoming_request(const transport::CoapRequest& request) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+
+    // Parse URI path to ObjectPath (e.g., "/3/0/1" -> Object 3, Instance 0, Resource 1)
+    auto path_opt = ObjectPath::parse(request.uri_path);
+    if (!path_opt) {
+        // Invalid path
+        transport::CoapResponse response;
+        response.code = transport::CoapCode::BadRequest;
+        return response;
+    }
+
+    transport::CoapResponse response;
+
+    switch (request.method) {
+        case transport::CoapMethod::Get:
+            response = process_read(*path_opt);
+            break;
+
+        case transport::CoapMethod::Put:
+            response = process_write(*path_opt, request.payload);
+            break;
+
+        case transport::CoapMethod::Post:
+            // POST = Execute (resource) or Create (object/instance)
+            if (path_opt->is_resource()) {
+                response = process_execute(*path_opt, request.payload);
+            } else {
+                response = process_write(*path_opt, request.payload);
+            }
+            break;
+
+        case transport::CoapMethod::Delete:
+            response = process_delete(*path_opt);
+            break;
+
+        default:
+            response.code = transport::CoapCode::MethodNotAllowed;
+            break;
+    }
+
+    return response;
 }
 
-transport::CoapResponse Client::process_read(const ObjectPath& /* path */) {
-    // TODO: Implement read processing
+transport::CoapResponse Client::process_read(const ObjectPath& path) {
     transport::CoapResponse response;
-    response.code = transport::CoapCode::Content;
+
+    // Debug logging
+    fprintf(stderr, "DEBUG: process_read called for path: /%u/%u/%u\n",
+            path.object_id.value,
+            path.instance_id ? path.instance_id->value : 999,
+            path.resource_id ? path.resource_id->value : 999);
+
+    // Find object by ID
+    Object* obj = get_object(path.object_id);
+    if (!obj) {
+        fprintf(stderr, "DEBUG: Object %u not found\n", path.object_id.value);
+        response.code = transport::CoapCode::NotFound;
+        return response;
+    }
+
+    fprintf(stderr, "DEBUG: Object %u found: %s\n", path.object_id.value, obj->name().data());
+
+    codec::TlvEncoder encoder;
+
+    if (path.is_object()) {
+        // Read entire object - all instances
+        std::vector<uint8_t> payload;
+        for (auto iid : obj->list_instances()) {
+            auto instance_data = encode_instance_tlv(obj, iid);
+            payload.insert(payload.end(), instance_data.begin(), instance_data.end());
+        }
+        response.payload = std::move(payload);
+        response.code = transport::CoapCode::Content;
+
+    } else if (path.is_instance()) {
+        // Read entire instance
+        if (!obj->has_instance(*path.instance_id)) {
+            response.code = transport::CoapCode::NotFound;
+            return response;
+        }
+        response.payload = encode_instance_tlv(obj, *path.instance_id);
+        response.code = transport::CoapCode::Content;
+
+    } else if (path.is_resource()) {
+        // Read single resource
+        fprintf(stderr, "DEBUG: Reading resource %u from instance %u\n",
+                path.resource_id->value, path.instance_id->value);
+
+        auto result = obj->read_resource(
+            *path.instance_id,
+            *path.resource_id,
+            path.resource_instance_id
+        );
+
+        if (!result) {
+            fprintf(stderr, "DEBUG: read_resource failed: %s\n", result.error().message().data());
+            response.code = error_to_coap_code(result.error().code());
+            return response;
+        }
+
+        fprintf(stderr, "DEBUG: read_resource succeeded, encoding TLV\n");
+
+        auto encoded = encoder.encode_resource(*path.resource_id, result.value());
+        if (encoded) {
+            fprintf(stderr, "DEBUG: TLV encoding succeeded, payload size: %zu\n", encoded.value().size());
+            response.payload = std::move(encoded.value());
+            response.code = transport::CoapCode::Content;
+            // content_format is already set to TlvLwm2m by default
+        } else {
+            fprintf(stderr, "DEBUG: TLV encoding failed: %s\n", encoded.error().message().data());
+            response.code = transport::CoapCode::InternalServerError;
+        }
+    }
+
+    fprintf(stderr, "DEBUG: Returning response with code %u, payload size %zu\n",
+            static_cast<unsigned>(response.code), response.payload.size());
+
     return response;
 }
 
 transport::CoapResponse Client::process_write(
-    const ObjectPath& /* path */,
-    const std::vector<uint8_t>& /* payload */
+    const ObjectPath& path,
+    const std::vector<uint8_t>& payload
 ) {
-    // TODO: Implement write processing
     transport::CoapResponse response;
-    response.code = transport::CoapCode::Changed;
+
+    Object* obj = get_object(path.object_id);
+    if (!obj) {
+        response.code = transport::CoapCode::NotFound;
+        return response;
+    }
+
+    codec::TlvDecoder decoder;
+    auto records = decoder.decode(payload);
+    if (!records) {
+        response.code = transport::CoapCode::BadRequest;
+        return response;
+    }
+
+    if (path.is_resource()) {
+        // Write single resource
+        if (records.value().empty()) {
+            response.code = transport::CoapCode::BadRequest;
+            return response;
+        }
+
+        const auto& record = records.value()[0];
+
+        // Get expected type from object for proper TLV decoding
+        ResourceType expected_type = ResourceType::String;  // Default fallback
+        if (auto type = obj->get_resource_type(*path.instance_id, *path.resource_id)) {
+            expected_type = *type;
+        }
+
+        // Decode TLV with correct type
+        auto decoded = decoder.decode_resource(record.value, expected_type);
+        if (!decoded) {
+            response.code = transport::CoapCode::BadRequest;
+            return response;
+        }
+        ResourceValue value = decoded.value();
+
+        auto result = obj->write_resource(
+            *path.instance_id,
+            *path.resource_id,
+            path.resource_instance_id,
+            value
+        );
+
+        response.code = result ?
+            transport::CoapCode::Changed :
+            error_to_coap_code(result.error().code());
+
+    } else if (path.is_instance()) {
+        // Write multiple resources in instance
+        for (const auto& record : records.value()) {
+            if (record.type == codec::TlvType::Resource) {
+                ResourceId rid{record.id};
+
+                // Get expected type for this resource
+                ResourceType expected_type = ResourceType::String;
+                if (auto type = obj->get_resource_type(*path.instance_id, rid)) {
+                    expected_type = *type;
+                }
+
+                // Decode TLV with correct type
+                auto decoded = decoder.decode_resource(record.value, expected_type);
+                if (decoded) {
+                    (void)obj->write_resource(
+                        *path.instance_id,
+                        rid,
+                        std::nullopt,
+                        decoded.value()
+                    );
+                }
+            }
+        }
+        response.code = transport::CoapCode::Changed;
+
+    } else if (path.is_object()) {
+        // Create new instance
+        auto result = obj->create_instance(std::nullopt);
+        if (result) {
+            response.code = transport::CoapCode::Created;
+        } else {
+            response.code = error_to_coap_code(result.error().code());
+        }
+    }
+
     return response;
 }
 
 transport::CoapResponse Client::process_execute(
-    const ObjectPath& /* path */,
-    const std::vector<uint8_t>& /* payload */
+    const ObjectPath& path,
+    const std::vector<uint8_t>& payload
 ) {
-    // TODO: Implement execute processing
     transport::CoapResponse response;
-    response.code = transport::CoapCode::Changed;
+
+    if (!path.is_resource()) {
+        response.code = transport::CoapCode::MethodNotAllowed;
+        return response;
+    }
+
+    Object* obj = get_object(path.object_id);
+    if (!obj) {
+        response.code = transport::CoapCode::NotFound;
+        return response;
+    }
+
+    // Convert payload to arguments string
+    std::string_view args(
+        reinterpret_cast<const char*>(payload.data()),
+        payload.size()
+    );
+
+    auto result = obj->execute_resource(
+        *path.instance_id,
+        *path.resource_id,
+        args
+    );
+
+    response.code = result ?
+        transport::CoapCode::Changed :
+        error_to_coap_code(result.error().code());
+
     return response;
 }
 
-transport::CoapResponse Client::process_discover(const ObjectPath& /* path */) {
-    // TODO: Implement discover processing
+transport::CoapResponse Client::process_discover(const ObjectPath& path) {
     transport::CoapResponse response;
+
+    Object* obj = get_object(path.object_id);
+    if (!obj) {
+        response.code = transport::CoapCode::NotFound;
+        return response;
+    }
+
+    // Build CoRE Link Format response
+    std::ostringstream oss;
+    bool first = true;
+
+    if (path.is_object()) {
+        // Discover all instances and resources
+        for (auto iid : obj->list_instances()) {
+            for (auto rid : obj->list_resources(iid)) {
+                if (!first) oss << ",";
+                first = false;
+                oss << "</" << path.object_id.value << "/"
+                    << iid.value << "/" << rid.value << ">";
+            }
+        }
+    } else if (path.is_instance()) {
+        // Discover resources in instance
+        for (auto rid : obj->list_resources(*path.instance_id)) {
+            if (!first) oss << ",";
+            first = false;
+            oss << "</" << path.object_id.value << "/"
+                << path.instance_id->value << "/" << rid.value << ">";
+        }
+    } else if (path.is_resource()) {
+        // Single resource discover
+        oss << "</" << path.object_id.value << "/"
+            << path.instance_id->value << "/" << path.resource_id->value << ">";
+    }
+
+    std::string link_format = oss.str();
+    response.payload = std::vector<uint8_t>(link_format.begin(), link_format.end());
     response.code = transport::CoapCode::Content;
+
     return response;
+}
+
+transport::CoapResponse Client::process_delete(const ObjectPath& path) {
+    transport::CoapResponse response;
+
+    if (!path.is_instance()) {
+        response.code = transport::CoapCode::MethodNotAllowed;
+        return response;
+    }
+
+    Object* obj = get_object(path.object_id);
+    if (!obj) {
+        response.code = transport::CoapCode::NotFound;
+        return response;
+    }
+
+    auto result = obj->delete_instance(*path.instance_id);
+    response.code = result ?
+        transport::CoapCode::Deleted :
+        error_to_coap_code(result.error().code());
+
+    return response;
+}
+
+transport::CoapCode Client::error_to_coap_code(ErrorCode code) noexcept {
+    switch (code) {
+        case ErrorCode::NotFound:
+            return transport::CoapCode::NotFound;
+        case ErrorCode::MethodNotAllowed:
+            return transport::CoapCode::MethodNotAllowed;
+        case ErrorCode::BadRequest:
+            return transport::CoapCode::BadRequest;
+        case ErrorCode::Unauthorized:
+            return transport::CoapCode::Unauthorized;
+        case ErrorCode::Forbidden:
+            return transport::CoapCode::Forbidden;
+        default:
+            return transport::CoapCode::InternalServerError;
+    }
+}
+
+std::vector<uint8_t> Client::encode_instance_tlv(Object* obj, InstanceId iid) const {
+    codec::TlvEncoder encoder;
+    std::vector<std::pair<ResourceId, ResourceValue>> resources;
+
+    for (auto rid : obj->list_resources(iid)) {
+        auto result = obj->read_resource(iid, rid, std::nullopt);
+        if (result) {
+            resources.emplace_back(rid, std::move(result.value()));
+        }
+    }
+
+    auto encoded = encoder.encode_instance(iid, resources);
+    return encoded ? std::move(encoded.value()) : std::vector<uint8_t>{};
 }
 
 void Client::set_state(ClientState new_state) {
