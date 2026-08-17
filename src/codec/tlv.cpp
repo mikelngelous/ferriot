@@ -243,12 +243,23 @@ std::vector<uint8_t> TlvEncoder::serialize_objlink(const ObjectPath& value) {
 
 // TLV Decoder Implementation
 
+// LWM2M nesting is Object->Instance->MultiResource->ResourceInstance; 8 is ample
+static constexpr unsigned kMaxTlvDepth = 8;
+
 Result<std::vector<TlvRecord>> TlvDecoder::decode(const std::vector<uint8_t>& data) {
+    return decode_impl(data, 0);
+}
+
+Result<std::vector<TlvRecord>> TlvDecoder::decode_impl(const std::vector<uint8_t>& data, unsigned depth) {
+    if (depth > kMaxTlvDepth) {
+        return Err<std::vector<TlvRecord>>(ErrorCode::DecodingError, "TLV nesting too deep");
+    }
+
     std::vector<TlvRecord> records;
     size_t pos = 0;
 
     while (pos < data.size()) {
-        auto result = parse_record(data.data() + pos, data.size() - pos);
+        auto result = parse_record(data.data() + pos, data.size() - pos, depth);
         if (!result) {
             return Err<std::vector<TlvRecord>>(result.error());
         }
@@ -261,7 +272,7 @@ Result<std::vector<TlvRecord>> TlvDecoder::decode(const std::vector<uint8_t>& da
     return Ok(std::move(records));
 }
 
-Result<std::pair<TlvRecord, size_t>> TlvDecoder::parse_record(const uint8_t* data, size_t len) {
+Result<std::pair<TlvRecord, size_t>> TlvDecoder::parse_record(const uint8_t* data, size_t len, unsigned depth) {
     if (len == 0) {
         return Err<std::pair<TlvRecord, size_t>>(ErrorCode::DecodingError, "Empty TLV data");
     }
@@ -334,7 +345,7 @@ Result<std::pair<TlvRecord, size_t>> TlvDecoder::parse_record(const uint8_t* dat
 
     // Parse nested records for ObjectInstance and MultiResource types
     if (type == TlvType::ObjectInstance || type == TlvType::MultiResource) {
-        auto nested = decode(record.value);
+        auto nested = decode_impl(record.value, depth + 1);
         if (nested) {
             record.children = std::move(nested.value());
         }

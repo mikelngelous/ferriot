@@ -84,9 +84,14 @@ public:
     );
 
 private:
+    // Recursion-depth-bounded decode (guards against malicious nested TLV)
+    [[nodiscard]] Result<std::vector<TlvRecord>> decode_impl(
+        const std::vector<uint8_t>& data, unsigned depth
+    );
+
     // Parse single TLV record at position, returns bytes consumed
     [[nodiscard]] Result<std::pair<TlvRecord, size_t>> parse_record(
-        const uint8_t* data, size_t len
+        const uint8_t* data, size_t len, unsigned depth
     );
 
     // Value deserializers
