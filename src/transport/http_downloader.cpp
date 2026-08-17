@@ -188,7 +188,7 @@ Result<void> HttpDownloader::start_download(
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);     // For 60 seconds
 
         // User agent
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "ferriot-client/1.0");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "ferriot-client/0.1");
 
         CURLcode res = curl_easy_perform(curl);
 

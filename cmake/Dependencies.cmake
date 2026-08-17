@@ -34,11 +34,26 @@ else()
     message(STATUS "Found system libcoap: ${libcoap-3_VERSION}")
 endif()
 
+# Expose libcoap headers as SYSTEM so their C-style casts don't trip our -Werror
+if(TARGET coap-3)
+    get_target_property(_coap_incs coap-3 INTERFACE_INCLUDE_DIRECTORIES)
+    if(_coap_incs)
+        set_target_properties(coap-3 PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_coap_incs}")
+    endif()
+endif()
+
 # ============================================================================
 # OpenSSL - Required for DTLS
 # ============================================================================
 find_package(OpenSSL 1.1 REQUIRED)
 message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
+
+# ============================================================================
+# libcurl - HTTP/HTTPS downloads for FOTA
+# ============================================================================
+find_package(CURL REQUIRED)
+message(STATUS "Found libcurl: ${CURL_VERSION_STRING}")
 
 # ============================================================================
 # GoogleTest - Testing framework (only if tests enabled)

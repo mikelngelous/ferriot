@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 project(ferriot
-    VERSION 1.0.0
+    VERSION 0.1.0
     DESCRIPTION "Ferriot - Modern C++17 LWM2M client for Linux edge"
     LANGUAGES CXX
 )
@@ -61,6 +61,7 @@ target_link_libraries(lwm2m
         coap-3
         OpenSSL::SSL
         OpenSSL::Crypto
+        CURL::libcurl
         Threads::Threads
 )
 
@@ -69,8 +70,8 @@ target_compile_options(lwm2m PRIVATE ${LWM2M_WARNING_FLAGS})
 
 # Sanitizers for Debug builds
 if(LWM2M_ENABLE_SANITIZERS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(lwm2m PRIVATE -fsanitize=address,undefined)
-    target_link_options(lwm2m PRIVATE -fsanitize=address,undefined)
+    target_compile_options(lwm2m PUBLIC -fsanitize=address,undefined)
+    target_link_options(lwm2m PUBLIC -fsanitize=address,undefined)
 endif()
 
 # Tests
