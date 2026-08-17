@@ -55,6 +55,9 @@ public:
     // Resource access
     [[nodiscard]] std::vector<ResourceId> list_resources(InstanceId iid) const override;
 
+    [[nodiscard]] std::optional<ResourceType> get_resource_type(
+        InstanceId iid, ResourceId rid) const override;
+
     [[nodiscard]] Result<ResourceValue> read_resource(
         InstanceId iid,
         ResourceId rid,

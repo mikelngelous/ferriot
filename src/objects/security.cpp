@@ -58,6 +58,31 @@ std::vector<ResourceId> SecurityObject::list_resources(InstanceId /* iid */) con
     };
 }
 
+std::optional<ResourceType> SecurityObject::get_resource_type(
+    [[maybe_unused]] InstanceId iid, ResourceId rid) const {
+    switch (rid.value) {
+        case 0:  // Server URI
+        case 9:  // SMS Server Number
+            return ResourceType::String;
+        case 1:  // Bootstrap Server
+            return ResourceType::Boolean;
+        case 2:  // Security Mode
+        case 6:  // SMS Security Mode
+        case 10: // Short Server ID
+        case 11: // Client Hold Off Time
+        case 12: // Bootstrap Server Account Timeout
+            return ResourceType::Integer;
+        case 3:  // Public Key or Identity
+        case 4:  // Server Public Key
+        case 5:  // Secret Key
+        case 7:  // SMS Binding Key Parameters
+        case 8:  // SMS Binding Secret Key(s)
+            return ResourceType::Opaque;
+        default:
+            return std::nullopt;
+    }
+}
+
 Result<ResourceValue> SecurityObject::read_resource(
     InstanceId iid,
     ResourceId rid,
