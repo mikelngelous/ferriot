@@ -1,6 +1,6 @@
 # Ferriot
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/mikelngelous/ferriot/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/mikelngelous/ferriot/releases)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)]()
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
