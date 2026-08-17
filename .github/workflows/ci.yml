@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }}${{ matrix.sanitizers == 'ON' && ' +ASAN' || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { compiler: gcc,   build_type: Debug,   sanitizers: 'ON'  }
+          - { compiler: gcc,   build_type: Release, sanitizers: 'OFF' }
+          - { compiler: clang, build_type: Release, sanitizers: 'OFF' }
+          - { compiler: clang, build_type: Debug,   sanitizers: 'OFF' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libssl-dev libcurl4-openssl-dev pkg-config
+
+      - name: Select compiler
+        run: |
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            echo "CC=clang"   >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          else
+            echo "CC=gcc"  >> "$GITHUB_ENV"
+            echo "CXX=g++"  >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DLWM2M_ENABLE_SANITIZERS=${{ matrix.sanitizers }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
