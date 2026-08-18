@@ -1,25 +1,45 @@
 # Ferriot
 
+[![CI](https://github.com/mikelngelous/ferriot/actions/workflows/ci.yml/badge.svg)](https://github.com/mikelngelous/ferriot/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/mikelngelous/ferriot/releases)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)]()
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-The rock-solid, modern C++17 LWM2M (Lightweight M2M) client for Linux edge and gateways.
+A modern C++17 LWM2M (Lightweight M2M) client for Linux edge and gateways.
 
-Native stack over libcoap — no C wrapper — with a type-safe object model, RAII, and
-`Result<T>` error handling. The public API lives under the `lwm2m::` namespace.
+Built directly on libcoap with a type-safe object model, RAII, and `Result<T>` error
+handling. The public API lives under the `lwm2m::` namespace.
 
 ## Why Ferriot
 
-The LWM2M client ecosystem is split between C libraries built for kilobyte-RAM
-microcontrollers (Wakaama, Anjay, IOWA, Zephyr) and a Java server (Leshan). On a Linux
-gateway with C++17 and megabytes of RAM, those C callback APIs are needlessly arcane.
-Ferriot targets that gap:
+The LWM2M client ecosystem is mostly C libraries built for kilobyte-RAM
+microcontrollers (Wakaama, Anjay, IOWA, Zephyr), plus a Java server (Leshan). Their C
+callback APIs fit a Linux gateway with C++17 and megabytes of RAM poorly. Ferriot
+targets that gap:
 
-- **Native C++17, not a wrapper** — the stack is built directly on libcoap, unlike the
-  few C++ options that wrap Wakaama's C core.
-- **Permissive by default** — Apache 2.0, no dual-commercial licensing.
-- **Edge/gateway first** — designed for Linux, not retrofitted from an MCU codebase.
+- **Native C++17 stack** — built directly on libcoap, not a wrapper over Wakaama's C
+  core like the other C++ options.
+- **Permissive** — Apache 2.0, free for commercial use.
+- **Edge/gateway first** — designed for Linux from the start.
+
+## Footprint
+
+Built natively on an NXP FRDM-i.MX93 (Cortex-A55, aarch64) and registered against a
+Leshan server over the network. NoSec, one server, idle after registration:
+
+| Metric | Value |
+|--------|-------|
+| Example client binary (stripped, libcoap linked static) | 517 KB |
+| Resident memory (RSS) while registered | ~1.8 MB |
+
+The 119 unit tests build and pass on the same board. OpenSSL and libcurl are shared
+system libraries; libcoap is bundled statically.
+
+![Ferriot on an i.MX93 board, registered in Eclipse Leshan](docs/images/leshan-imx93.png)
+
+*Ferriot running on an NXP FRDM-i.MX93, registered against the public Eclipse Leshan
+server. The server has read the Device object over CoAP — manufacturer and model
+report as Ferriot.*
 
 ## Architecture
 
