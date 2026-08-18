@@ -35,8 +35,9 @@ private:
     // Internal poll without locking (caller must hold io_mtx_)
     void poll_unlocked(std::chrono::milliseconds timeout);
 
-    // Mutex to protect libcoap calls (not thread-safe)
-    mutable std::mutex io_mtx_;
+    // Protects libcoap calls (not thread-safe). Recursive: connect() holds it
+    // while calling disconnect().
+    mutable std::recursive_mutex io_mtx_;
 
     // libcoap callbacks
     static coap_response_t response_handler(
@@ -67,7 +68,7 @@ private:
     coap_session_t* session_ = nullptr;
 
     RequestHandler request_handler_;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
 
     // PSK credentials storage (must outlive session)
     std::string psk_identity_;
@@ -77,7 +78,9 @@ private:
     struct PendingResponse {
         bool completed = false;
         CoapResponse response;
+        std::vector<uint8_t> token;
     };
+    uint64_t next_token_ = 0;
     PendingResponse* current_response_ = nullptr;
 };
 
@@ -103,6 +106,7 @@ namespace {
 }
 
 Result<void> CoapClientImpl::connect(const ConnectionConfig& config) {
+    std::lock_guard<std::recursive_mutex> lock(io_mtx_);
     disconnect();
 
     // Initialize libcoap (reference counted)
@@ -266,6 +270,7 @@ Result<void> CoapClientImpl::connect(const ConnectionConfig& config) {
 }
 
 void CoapClientImpl::disconnect() {
+    std::lock_guard<std::recursive_mutex> lock(io_mtx_);
     if (session_) {
         coap_session_release(session_);
         session_ = nullptr;
@@ -289,14 +294,14 @@ void CoapClientImpl::disconnect() {
 }
 
 bool CoapClientImpl::is_connected() const noexcept {
-    return connected_ && session_ != nullptr;
+    return connected_.load();
 }
 
 Result<CoapResponse> CoapClientImpl::send(
     const CoapRequest& request,
     std::chrono::milliseconds timeout
 ) {
-    std::lock_guard<std::mutex> lock(io_mtx_);
+    std::lock_guard<std::recursive_mutex> lock(io_mtx_);
 
     if (!is_connected()) {
         return Err<CoapResponse>(ErrorCode::InvalidState, "Not connected");
@@ -321,6 +326,12 @@ Result<CoapResponse> CoapClientImpl::send(
     if (!pdu) {
         return Err<CoapResponse>(ErrorCode::InternalServerError, "Failed to create PDU");
     }
+
+    // Unique token so a stale/duplicate response isn't taken for this reply.
+    uint8_t token[8];
+    uint64_t tok_val = ++next_token_;
+    std::memcpy(token, &tok_val, sizeof(token));
+    coap_add_token(pdu, sizeof(token), token);
 
     // Add URI path and query options
     coap_uri_t uri;
@@ -412,11 +423,17 @@ Result<CoapResponse> CoapClientImpl::send(
 
     // Add payload
     if (!request.payload.empty()) {
-        coap_add_data(pdu, request.payload.size(), request.payload.data());
+        // 0 = body doesn't fit the PDU; no block-wise here, so fail vs truncate.
+        if (coap_add_data(pdu, request.payload.size(), request.payload.data()) == 0) {
+            coap_delete_pdu(pdu);
+            return Err<CoapResponse>(ErrorCode::InternalServerError,
+                "Payload does not fit in a single PDU (block-wise not supported)");
+        }
     }
 
     // Setup response tracking
     PendingResponse pending;
+    pending.token.assign(token, token + sizeof(token));
     current_response_ = &pending;
 
     // Send request
@@ -447,7 +464,7 @@ void CoapClientImpl::set_request_handler(RequestHandler handler) {
 }
 
 void CoapClientImpl::poll(std::chrono::milliseconds timeout) {
-    std::lock_guard<std::mutex> lock(io_mtx_);
+    std::lock_guard<std::recursive_mutex> lock(io_mtx_);
     poll_unlocked(timeout);
 }
 
@@ -465,6 +482,13 @@ coap_response_t CoapClientImpl::response_handler(
 ) {
     auto* impl = static_cast<CoapClientImpl*>(coap_session_get_app_data(session));
     if (!impl || !impl->current_response_) {
+        return COAP_RESPONSE_OK;
+    }
+
+    coap_bin_const_t tok = coap_pdu_get_token(received);
+    const auto& expected = impl->current_response_->token;
+    if (tok.length != expected.size() ||
+        (tok.length != 0 && std::memcmp(tok.s, expected.data(), tok.length) != 0)) {
         return COAP_RESPONSE_OK;
     }
 
