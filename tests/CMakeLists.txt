@@ -2,8 +2,7 @@
 
 enable_testing()
 
-# Find GoogleTest
-find_package(GTest REQUIRED)
+# GoogleTest targets (GTest::gtest, ...) come from FetchContent in Dependencies.cmake
 include(GoogleTest)
 
 # ============================================================================
