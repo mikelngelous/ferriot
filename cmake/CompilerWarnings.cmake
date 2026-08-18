@@ -31,6 +31,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -Wduplicated-branches
             -Wlogical-op
             -Wuseless-cast
+            -Wno-array-bounds
+            -Wno-free-nonheap-object
         )
     endif()
 
