@@ -35,9 +35,9 @@ Result<ResourceValue> FirmwareUpdateObject::read_resource(
         case 1:  // Package URI (write-only for security)
             return Err<ResourceValue>(ErrorCode::MethodNotAllowed, "Package URI is write-only");
         case 3:  // State
-            return Ok<ResourceValue>(static_cast<int64_t>(state_));
+            return Ok<ResourceValue>(static_cast<int64_t>(state_.load()));
         case 5:  // Update Result
-            return Ok<ResourceValue>(static_cast<int64_t>(update_result_));
+            return Ok<ResourceValue>(static_cast<int64_t>(update_result_.load()));
         case 6:  // Package Name
             return Ok<ResourceValue>(package_name_);
         case 7:  // Package Version
@@ -77,7 +77,7 @@ Result<void> FirmwareUpdateObject::write_resource(
     switch (rid.value) {
         case 0: {  // Package
             // Can only write package in Idle or Downloaded state
-            if (state_ != FirmwareState::Idle && state_ != FirmwareState::Downloaded) {
+            if (state_.load() != FirmwareState::Idle && state_.load() != FirmwareState::Downloaded) {
                 return Err<void>(ErrorCode::MethodNotAllowed, "Cannot write package in current state");
             }
 
@@ -88,7 +88,7 @@ Result<void> FirmwareUpdateObject::write_resource(
         }
         case 1: {  // Package URI
             // Can only write URI in Idle state
-            if (state_ != FirmwareState::Idle) {
+            if (state_.load() != FirmwareState::Idle) {
                 return Err<void>(ErrorCode::MethodNotAllowed, "Cannot write URI in current state");
             }
 
@@ -127,7 +127,7 @@ Result<void> FirmwareUpdateObject::execute_resource(
     switch (rid.value) {
         case 2: {  // Update (Execute)
             // Can only execute update in Downloaded state
-            if (state_ != FirmwareState::Downloaded) {
+            if (state_.load() != FirmwareState::Downloaded) {
                 return Err<void>(ErrorCode::MethodNotAllowed, "Cannot update: not in Downloaded state");
             }
 
@@ -174,7 +174,7 @@ void FirmwareUpdateObject::set_delivery_method(FirmwareDeliveryMethod method) {
 }
 
 Result<void> FirmwareUpdateObject::push_package(const std::vector<uint8_t>& data) {
-    if (state_ != FirmwareState::Idle && state_ != FirmwareState::Downloaded) {
+    if (state_.load() != FirmwareState::Idle && state_.load() != FirmwareState::Downloaded) {
         return Err<void>(ErrorCode::MethodNotAllowed, "Cannot push package in current state");
     }
 
@@ -196,7 +196,7 @@ Result<void> FirmwareUpdateObject::push_package(const std::vector<uint8_t>& data
 }
 
 void FirmwareUpdateObject::download_complete(bool success) {
-    if (state_ != FirmwareState::Downloading) {
+    if (state_.load() != FirmwareState::Downloading) {
         return;
     }
 

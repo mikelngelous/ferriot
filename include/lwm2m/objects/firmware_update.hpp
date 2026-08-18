@@ -5,6 +5,7 @@
 
 #include "../object.hpp"
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -106,10 +107,10 @@ public:
     void set_callbacks(FirmwareUpdateCallbacks callbacks);
 
     // State management
-    [[nodiscard]] FirmwareState state() const noexcept { return state_; }
+    [[nodiscard]] FirmwareState state() const noexcept { return state_.load(); }
     void set_state(FirmwareState state);
 
-    [[nodiscard]] FirmwareUpdateResult update_result() const noexcept { return update_result_; }
+    [[nodiscard]] FirmwareUpdateResult update_result() const noexcept { return update_result_.load(); }
     void set_update_result(FirmwareUpdateResult result);
 
     // Package info (set after download/verification)
@@ -129,8 +130,9 @@ public:
     void update_complete(FirmwareUpdateResult result);
 
 private:
-    FirmwareState state_ = FirmwareState::Idle;
-    FirmwareUpdateResult update_result_ = FirmwareUpdateResult::Initial;
+    // Written by the download thread, read by the CoAP thread
+    std::atomic<FirmwareState> state_{FirmwareState::Idle};
+    std::atomic<FirmwareUpdateResult> update_result_{FirmwareUpdateResult::Initial};
 
     std::string package_uri_;
     std::vector<uint8_t> package_data_;
