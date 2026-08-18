@@ -75,11 +75,11 @@ objects::FirmwareUpdateObject& Client::firmware_update() {
 }
 
 Result<void> Client::start() {
-    if (running_.load()) {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mtx_);
+    if (running_.exchange(true)) {
         return Err<void>(ErrorCode::InvalidState, "Client already running");
     }
 
-    running_.store(true);
     set_state(ClientState::Idle);
 
     // Start event loop thread
@@ -89,7 +89,13 @@ Result<void> Client::start() {
 }
 
 void Client::stop() {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mtx_);
     running_.store(false);
+
+    // A callback on the event thread may call stop(); self-join would terminate.
+    if (event_thread_ && event_thread_->get_id() == std::this_thread::get_id()) {
+        return;
+    }
 
     if (event_thread_ && event_thread_->joinable()) {
         event_thread_->join();
@@ -334,6 +340,7 @@ std::vector<uint16_t> Client::registered_servers() const {
 }
 
 void Client::set_callbacks(ClientCallbacks callbacks) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     callbacks_ = std::move(callbacks);
 }
 

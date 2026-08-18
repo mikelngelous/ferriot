@@ -176,6 +176,9 @@ private:
     std::atomic<bool> running_{false};
     std::unique_ptr<std::thread> event_thread_;
 
+    // Serializes start()/stop(); mtx_ guards data, this guards the thread
+    std::mutex lifecycle_mtx_;
+
     // Thread safety for shared containers
     // Using recursive_mutex to allow nested calls from within locked methods
     mutable std::recursive_mutex mtx_;
