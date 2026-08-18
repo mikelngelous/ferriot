@@ -4,8 +4,10 @@
 
 #include <curl/curl.h>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 
 namespace lwm2m::transport {
 
@@ -21,17 +23,26 @@ struct DownloadContext {
     double last_speed{0.0};
 };
 
+// curl_global_init/cleanup are process-global and not refcounted; run them once
+// per process rather than per instance to avoid tearing down state that a live
+// download thread in another instance is still using.
+void ensure_curl_global_init() {
+    static std::once_flag flag;
+    std::call_once(flag, [] {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        std::atexit([] { curl_global_cleanup(); });
+    });
+}
+
 } // anonymous namespace
 
 HttpDownloader::HttpDownloader() {
-    // Initialize curl globally (thread-safe in modern curl)
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    ensure_curl_global_init();
 }
 
 HttpDownloader::~HttpDownloader() {
     cancel();
     cleanup_thread();
-    curl_global_cleanup();
 }
 
 void HttpDownloader::cleanup_thread() {
@@ -177,6 +188,11 @@ Result<void> HttpDownloader::start_download(
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
 
+        // The URL is server-controlled; keep it to HTTP(S) so a malicious
+        // redirect can't reach file://, gopher://, etc.
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+
         // SSL/TLS settings
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
@@ -195,6 +211,8 @@ Result<void> HttpDownloader::start_download(
         // Get final info
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_off_t downloaded = 0;
+        curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &downloaded);
 
         // Cleanup
         ctx.file.close();
@@ -217,6 +235,11 @@ Result<void> HttpDownloader::start_download(
             std::remove(dest_path.c_str());
             if (on_complete) {
                 on_complete(false, "HTTP error: " + std::to_string(http_code));
+            }
+        } else if (downloaded <= 0) {
+            std::remove(dest_path.c_str());
+            if (on_complete) {
+                on_complete(false, "Empty download (0 bytes)");
             }
         } else {
             if (on_complete) {
