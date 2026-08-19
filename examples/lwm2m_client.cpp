@@ -172,8 +172,14 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Client running. Press Ctrl+C to stop.\n";
 
+    // Simulate a draining battery so Observe on /3/0/9 has something to notify.
+    uint8_t battery = 100;
     while (running.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds{1});
+        std::this_thread::sleep_for(std::chrono::seconds{3});
+        if (battery > 0) {
+            --battery;
+        }
+        client.device().set_battery_level(battery);
     }
 
     std::cout << "\nShutting down...\n";

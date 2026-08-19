@@ -126,6 +126,7 @@ void Client::stop() {
         }
         connections_.clear();
         registrations_.clear();
+        observations_.clear();
     }
 
     set_state(ClientState::Idle);
@@ -170,8 +171,8 @@ Result<void> Client::register_with_server(uint16_t short_server_id) {
         }
 
         // Set request handler - forward incoming requests from server to our handler
-        conn->set_request_handler([this](const transport::CoapRequest& req) {
-            return handle_incoming_request(req);
+        conn->set_request_handler([this, short_server_id](const transport::CoapRequest& req) {
+            return handle_incoming_request(req, short_server_id);
         });
 
         connections_[short_server_id] = std::move(conn);
@@ -284,6 +285,7 @@ Result<void> Client::deregister(uint16_t short_server_id) {
     }
 
     registrations_.erase(it);
+    purge_observations(short_server_id);
 
     if (callbacks_.on_deregistered) {
         callbacks_.on_deregistered(short_server_id);
@@ -294,21 +296,25 @@ Result<void> Client::deregister(uint16_t short_server_id) {
 }
 
 void Client::poll() {
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
-    for (auto& [id, conn] : connections_) {
-        conn->poll(config_.poll_interval);
-        (void)id;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        for (auto& [id, conn] : connections_) {
+            conn->poll(config_.poll_interval);
+            (void)id;
+        }
+
+        check_registration_updates();
+
+        check_connection_health();
+
+        if (reconnecting_.load() &&
+            std::chrono::steady_clock::now() >= next_reconnect_time_) {
+            try_reconnect(reconnect_ssid_);
+        }
     }
 
-    check_registration_updates();
-
-    check_connection_health();
-
-    // Handle reconnection if in progress and backoff time has passed
-    if (reconnecting_.load() &&
-        std::chrono::steady_clock::now() >= next_reconnect_time_) {
-        try_reconnect(reconnect_ssid_);
-    }
+    // Notifications go out unlocked (never send over the network holding mtx_)
+    check_observations();
 }
 
 ClientState Client::state() const noexcept {
@@ -351,7 +357,8 @@ void Client::run_event_loop() {
     }
 }
 
-transport::CoapResponse Client::handle_incoming_request(const transport::CoapRequest& request) {
+transport::CoapResponse Client::handle_incoming_request(
+    const transport::CoapRequest& request, uint16_t short_server_id) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
 
     // Parse URI path to ObjectPath (e.g., "/3/0/1" -> Object 3, Instance 0, Resource 1)
@@ -367,7 +374,17 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
 
     switch (request.method) {
         case transport::CoapMethod::Get:
-            response = process_read(*path_opt);
+            if (request.observe.has_value()) {
+                if (*request.observe == 0) {          // establish
+                    response = process_observe(*path_opt, request, short_server_id);
+                } else if (*request.observe == 1) {   // cancel
+                    response = process_cancel_observe(request);
+                } else {
+                    response = process_read(*path_opt);
+                }
+            } else {
+                response = process_read(*path_opt);
+            }
             break;
 
         case transport::CoapMethod::Put:
@@ -398,24 +415,15 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
 transport::CoapResponse Client::process_read(const ObjectPath& path) {
     transport::CoapResponse response;
 
-    fprintf(stderr, "DEBUG: process_read called for path: /%u/%u/%u\n",
-            path.object_id.value,
-            path.instance_id ? path.instance_id->value : 999,
-            path.resource_id ? path.resource_id->value : 999);
-
     Object* obj = get_object(path.object_id);
     if (!obj) {
-        fprintf(stderr, "DEBUG: Object %u not found\n", path.object_id.value);
         response.code = transport::CoapCode::NotFound;
         return response;
     }
 
-    fprintf(stderr, "DEBUG: Object %u found: %s\n", path.object_id.value, obj->name().data());
-
     codec::TlvEncoder encoder;
 
     if (path.is_object()) {
-        // Read entire object - all instances
         std::vector<uint8_t> payload;
         for (auto iid : obj->list_instances()) {
             auto instance_data = encode_instance_tlv(obj, iid);
@@ -425,7 +433,6 @@ transport::CoapResponse Client::process_read(const ObjectPath& path) {
         response.code = transport::CoapCode::Content;
 
     } else if (path.is_instance()) {
-        // Read entire instance
         if (!obj->has_instance(*path.instance_id)) {
             response.code = transport::CoapCode::NotFound;
             return response;
@@ -434,38 +441,20 @@ transport::CoapResponse Client::process_read(const ObjectPath& path) {
         response.code = transport::CoapCode::Content;
 
     } else if (path.is_resource()) {
-        // Read single resource
-        fprintf(stderr, "DEBUG: Reading resource %u from instance %u\n",
-                path.resource_id->value, path.instance_id->value);
-
         auto result = obj->read_resource(
-            *path.instance_id,
-            *path.resource_id,
-            path.resource_instance_id
-        );
-
+            *path.instance_id, *path.resource_id, path.resource_instance_id);
         if (!result) {
-            fprintf(stderr, "DEBUG: read_resource failed: %s\n", result.error().message().data());
             response.code = error_to_coap_code(result.error().code());
             return response;
         }
-
-        fprintf(stderr, "DEBUG: read_resource succeeded, encoding TLV\n");
-
         auto encoded = encoder.encode_resource(*path.resource_id, result.value());
         if (encoded) {
-            fprintf(stderr, "DEBUG: TLV encoding succeeded, payload size: %zu\n", encoded.value().size());
             response.payload = std::move(encoded.value());
             response.code = transport::CoapCode::Content;
-            // content_format is already set to TlvLwm2m by default
         } else {
-            fprintf(stderr, "DEBUG: TLV encoding failed: %s\n", encoded.error().message().data());
             response.code = transport::CoapCode::InternalServerError;
         }
     }
-
-    fprintf(stderr, "DEBUG: Returning response with code %u, payload size %zu\n",
-            static_cast<unsigned>(response.code), response.payload.size());
 
     return response;
 }
@@ -662,6 +651,171 @@ transport::CoapResponse Client::process_delete(const ObjectPath& path) {
         error_to_coap_code(result.error().code());
 
     return response;
+}
+
+namespace {
+constexpr uint16_t kObserveOption = 6;  // COAP_OPTION_OBSERVE (RFC 7641)
+
+// Encode an unsigned value as a CoAP option: big-endian, no leading zero bytes
+// (value 0 => empty option, which decodes back to 0).
+std::vector<uint8_t> encode_uint_option(uint32_t value) {
+    std::vector<uint8_t> out;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        uint8_t byte = static_cast<uint8_t>((value >> shift) & 0xFFu);
+        if (!out.empty() || byte != 0) {
+            out.push_back(byte);
+        }
+    }
+    return out;
+}
+}  // namespace
+
+transport::CoapResponse Client::process_observe(
+    const ObjectPath& path, const transport::CoapRequest& request, uint16_t short_server_id) {
+    // The initial read validates the path and produces the first notification body
+    transport::CoapResponse response = process_read(path);
+    if (response.code != transport::CoapCode::Content) {
+        return response;  // NotFound / error: don't register the observation
+    }
+
+    ObserveState st;
+    st.path = path;
+    st.token = request.token;
+    st.session = request.session;
+    st.short_server_id = short_server_id;
+    st.seq = 1;
+    st.content_format = response.content_format;
+    st.last_notify = std::chrono::steady_clock::now();
+
+    // Baseline for change detection
+    if (path.is_resource()) {
+        if (Object* obj = get_object(path.object_id)) {
+            auto v = obj->read_resource(*path.instance_id, *path.resource_id,
+                                        path.resource_instance_id);
+            if (v) {
+                st.last_value = v.value();
+            }
+        }
+    } else {
+        st.last_hash = fnv1a(response.payload);
+    }
+
+    // pmin/pmax from this server's default periods
+    if (auto srv = server_->find_by_short_server_id(short_server_id)) {
+        st.pmin = std::chrono::seconds{srv->default_min_period};
+        st.pmax = std::chrono::seconds{srv->default_max_period};
+    }
+
+    response.options.emplace_back(kObserveOption, encode_uint_option(st.seq));
+    observations_[ObserveKey{st.session, st.token}] = std::move(st);
+    return response;
+}
+
+transport::CoapResponse Client::process_cancel_observe(const transport::CoapRequest& request) {
+    observations_.erase(ObserveKey{request.session, request.token});
+    auto path_opt = ObjectPath::parse(request.uri_path);
+    if (!path_opt) {
+        transport::CoapResponse r;
+        r.code = transport::CoapCode::BadRequest;
+        return r;
+    }
+    return process_read(*path_opt);  // current value, no Observe option
+}
+
+void Client::check_observations() {
+    struct PendingNotify {
+        uint16_t ssid;
+        transport::SessionHandle session;
+        std::vector<uint8_t> token;
+        uint32_t seq;
+        transport::ContentFormat content_format;
+        std::vector<uint8_t> payload;
+        ObserveKey key;
+    };
+
+    std::vector<PendingNotify> pending;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        auto now = std::chrono::steady_clock::now();
+        for (auto& [key, obs] : observations_) {
+            transport::CoapResponse cur = process_read(obs.path);
+            if (cur.code != transport::CoapCode::Content) {
+                continue;  // path gone (e.g. instance deleted); leave for reactive purge
+            }
+
+            bool changed = false;
+            if (obs.path.is_resource()) {
+                if (Object* obj = get_object(obs.path.object_id)) {
+                    auto v = obj->read_resource(*obs.path.instance_id, *obs.path.resource_id,
+                                                obs.path.resource_instance_id);
+                    if (v) {
+                        changed = !obs.last_value || !(v.value() == *obs.last_value);
+                        if (changed) {
+                            obs.last_value = v.value();
+                        }
+                    }
+                }
+            } else {
+                uint64_t h = fnv1a(cur.payload);
+                changed = !obs.last_hash || h != *obs.last_hash;
+                if (changed) {
+                    obs.last_hash = h;
+                }
+            }
+
+            auto since = now - obs.last_notify;
+            if (obs.pmax.count() > 0 && since >= obs.pmax) {
+                changed = true;  // max period keep-alive
+            }
+            if (changed && obs.pmin.count() > 0 && since < obs.pmin) {
+                changed = false;  // min period: too soon
+            }
+
+            if (changed) {
+                obs.seq = (obs.seq + 1) & 0xFFFFFFu;
+                obs.last_notify = now;
+                pending.push_back({obs.short_server_id, obs.session, obs.token, obs.seq,
+                                   obs.content_format, cur.payload, key});
+            }
+        }
+    }
+
+    // Send unlocked; a failed notify means a dead session -> purge that observation
+    std::vector<ObserveKey> dead;
+    for (auto& pn : pending) {
+        transport::CoapClient* conn = nullptr;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mtx_);
+            auto it = connections_.find(pn.ssid);
+            if (it != connections_.end()) {
+                conn = it->second.get();
+            }
+        }
+        if (!conn) {
+            dead.push_back(pn.key);
+            continue;
+        }
+        auto r = conn->notify(pn.session, pn.token, pn.seq, transport::CoapCode::Content,
+                              pn.content_format, pn.payload, /*confirmable=*/true);
+        if (!r) {
+            dead.push_back(pn.key);
+        }
+    }
+
+    if (!dead.empty()) {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        for (const auto& k : dead) {
+            observations_.erase(k);
+        }
+    }
+}
+
+void Client::purge_observations(uint16_t short_server_id) {
+    for (auto it = observations_.begin(); it != observations_.end();) {
+        it = (it->second.short_server_id == short_server_id)
+             ? observations_.erase(it)
+             : std::next(it);
+    }
 }
 
 transport::CoapCode Client::error_to_coap_code(ErrorCode code) noexcept {

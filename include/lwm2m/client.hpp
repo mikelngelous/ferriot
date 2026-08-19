@@ -6,6 +6,7 @@
 #include "types.hpp"
 #include "result.hpp"
 #include "object.hpp"
+#include "observe.hpp"
 #include "transport/coap_client.hpp"
 
 #include <atomic>
@@ -143,12 +144,21 @@ public:
 private:
     // Internal methods
     void run_event_loop();
-    [[nodiscard]] transport::CoapResponse handle_incoming_request(const transport::CoapRequest& request);
+    [[nodiscard]] transport::CoapResponse handle_incoming_request(
+        const transport::CoapRequest& request, uint16_t short_server_id);
     transport::CoapResponse process_read(const ObjectPath& path);
     transport::CoapResponse process_write(const ObjectPath& path, const std::vector<uint8_t>& payload);
     transport::CoapResponse process_execute(const ObjectPath& path, const std::vector<uint8_t>& payload);
     transport::CoapResponse process_discover(const ObjectPath& path);
     transport::CoapResponse process_delete(const ObjectPath& path);
+
+    // Observe/Notify
+    transport::CoapResponse process_observe(const ObjectPath& path,
+                                            const transport::CoapRequest& request,
+                                            uint16_t short_server_id);
+    transport::CoapResponse process_cancel_observe(const transport::CoapRequest& request);
+    void check_observations();
+    void purge_observations(uint16_t short_server_id);
 
     // Helper methods
     [[nodiscard]] static transport::CoapCode error_to_coap_code(ErrorCode code) noexcept;
@@ -164,6 +174,7 @@ private:
     std::unordered_map<uint16_t, std::shared_ptr<Object>> objects_;
     std::unordered_map<uint16_t, std::unique_ptr<transport::CoapClient>> connections_;
     std::unordered_map<uint16_t, Registration> registrations_;
+    std::unordered_map<ObserveKey, ObserveState, ObserveKeyHash> observations_;
 
     // Mandatory object pointers (for quick access)
     std::shared_ptr<objects::SecurityObject> security_;

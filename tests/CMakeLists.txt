@@ -14,6 +14,7 @@ add_executable(lwm2m_tests
     test_result.cpp
     test_tlv_codec.cpp
     test_objects.cpp
+    test_observe.cpp
 )
 
 target_link_libraries(lwm2m_tests
