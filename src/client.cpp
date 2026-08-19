@@ -368,7 +368,7 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
 
     switch (request.method) {
         case transport::CoapMethod::Get:
-            response = process_read(*path_opt);
+            response = process_read(*path_opt, request.accept.value_or(transport::ContentFormat::TlvLwm2m));
             break;
 
         case transport::CoapMethod::Put:
@@ -396,7 +396,7 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
     return response;
 }
 
-transport::CoapResponse Client::process_read(const ObjectPath& path) {
+transport::CoapResponse Client::process_read(const ObjectPath& path, transport::ContentFormat accept) {
     transport::CoapResponse response;
 
     Object* obj = get_object(path.object_id);
@@ -433,7 +433,7 @@ transport::CoapResponse Client::process_read(const ObjectPath& path) {
         entries.push_back({*path.instance_id, *path.resource_id, std::move(v.value())});
     }
 
-    auto data_codec = codec::select_codec(transport::ContentFormat::TlvLwm2m);
+    auto data_codec = codec::select_codec(accept);
     auto encoded = data_codec->encode_read(path, entries);
     if (!encoded) {
         response.code = transport::CoapCode::InternalServerError;

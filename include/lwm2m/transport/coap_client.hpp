@@ -72,6 +72,7 @@ struct CoapRequest {
     std::vector<std::pair<uint16_t, std::vector<uint8_t>>> options;
     std::vector<uint8_t> payload;
     ContentFormat content_format = ContentFormat::TlvLwm2m;
+    std::optional<ContentFormat> accept;
 };
 
 // CoAP response

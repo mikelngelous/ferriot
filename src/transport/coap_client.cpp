@@ -616,6 +616,10 @@ void CoapClientImpl::incoming_request_handler(
                     coap_decode_var_bytes(coap_opt_value(option), coap_opt_length(option))
                 );
             }
+        } else if (opt_iter.number == COAP_OPTION_ACCEPT) {
+            coap_request.accept = static_cast<ContentFormat>(
+                coap_decode_var_bytes(coap_opt_value(option), coap_opt_length(option))
+            );
         }
     }
 
