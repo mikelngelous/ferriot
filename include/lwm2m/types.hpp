@@ -84,6 +84,13 @@ struct ObjectPath {
     [[nodiscard]] bool is_instance() const { return instance_id.has_value() && !resource_id.has_value(); }
     [[nodiscard]] bool is_resource() const { return resource_id.has_value() && !resource_instance_id.has_value(); }
     [[nodiscard]] bool is_resource_instance() const { return resource_instance_id.has_value(); }
+
+    [[nodiscard]] bool operator==(const ObjectPath& other) const {
+        return object_id == other.object_id
+            && instance_id == other.instance_id
+            && resource_id == other.resource_id
+            && resource_instance_id == other.resource_instance_id;
+    }
 };
 
 // Resource access permissions
