@@ -2,11 +2,17 @@
 
 #include "lwm2m/codec/codec.hpp"
 #include "lwm2m/codec/tlv_codec.hpp"
+#include "lwm2m/codec/senml_json.hpp"
+#include "lwm2m/codec/senml_cbor.hpp"
 
 namespace lwm2m::codec {
 
 std::unique_ptr<DataCodec> select_codec(transport::ContentFormat format) {
     switch (format) {
+        case transport::ContentFormat::SenmlJson:
+            return std::make_unique<SenmlJsonCodec>();
+        case transport::ContentFormat::SenmlCbor:
+            return std::make_unique<SenmlCborCodec>();
         case transport::ContentFormat::TlvLwm2m:
         default:
             return std::make_unique<TlvCodec>();

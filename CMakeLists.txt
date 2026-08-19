@@ -38,6 +38,9 @@ add_library(lwm2m
     src/object.cpp
     src/codec/tlv.cpp
     src/codec/cbor.cpp
+    src/codec/senml.cpp
+    src/codec/senml_json.cpp
+    src/codec/senml_cbor.cpp
     src/codec/tlv_codec.cpp
     src/codec/codec_registry.cpp
     src/transport/coap_client.cpp
