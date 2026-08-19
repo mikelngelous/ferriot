@@ -38,6 +38,8 @@ add_library(lwm2m
     src/object.cpp
     src/codec/tlv.cpp
     src/codec/cbor.cpp
+    src/codec/tlv_codec.cpp
+    src/codec/codec_registry.cpp
     src/transport/coap_client.cpp
     src/objects/security.cpp
     src/objects/server.cpp

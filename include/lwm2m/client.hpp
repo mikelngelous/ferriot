@@ -145,7 +145,8 @@ private:
     void run_event_loop();
     [[nodiscard]] transport::CoapResponse handle_incoming_request(const transport::CoapRequest& request);
     transport::CoapResponse process_read(const ObjectPath& path);
-    transport::CoapResponse process_write(const ObjectPath& path, const std::vector<uint8_t>& payload);
+    transport::CoapResponse process_write(const ObjectPath& path, const std::vector<uint8_t>& payload,
+                                          transport::ContentFormat content_format);
     transport::CoapResponse process_execute(const ObjectPath& path, const std::vector<uint8_t>& payload);
     transport::CoapResponse process_discover(const ObjectPath& path);
     transport::CoapResponse process_delete(const ObjectPath& path);

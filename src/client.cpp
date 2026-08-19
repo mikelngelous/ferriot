@@ -7,6 +7,7 @@
 #include "lwm2m/objects/connectivity.hpp"
 #include "lwm2m/objects/firmware_update.hpp"
 #include "lwm2m/codec/tlv.hpp"
+#include "lwm2m/codec/codec.hpp"
 
 #include <sstream>
 
@@ -371,7 +372,7 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
             break;
 
         case transport::CoapMethod::Put:
-            response = process_write(*path_opt, request.payload);
+            response = process_write(*path_opt, request.payload, request.content_format);
             break;
 
         case transport::CoapMethod::Post:
@@ -379,7 +380,7 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
             if (path_opt->is_resource()) {
                 response = process_execute(*path_opt, request.payload);
             } else {
-                response = process_write(*path_opt, request.payload);
+                response = process_write(*path_opt, request.payload, request.content_format);
             }
             break;
 
@@ -398,81 +399,56 @@ transport::CoapResponse Client::handle_incoming_request(const transport::CoapReq
 transport::CoapResponse Client::process_read(const ObjectPath& path) {
     transport::CoapResponse response;
 
-    fprintf(stderr, "DEBUG: process_read called for path: /%u/%u/%u\n",
-            path.object_id.value,
-            path.instance_id ? path.instance_id->value : 999,
-            path.resource_id ? path.resource_id->value : 999);
-
     Object* obj = get_object(path.object_id);
     if (!obj) {
-        fprintf(stderr, "DEBUG: Object %u not found\n", path.object_id.value);
         response.code = transport::CoapCode::NotFound;
         return response;
     }
 
-    fprintf(stderr, "DEBUG: Object %u found: %s\n", path.object_id.value, obj->name().data());
-
-    codec::TlvEncoder encoder;
-
+    std::vector<codec::ReadEntry> entries;
     if (path.is_object()) {
-        // Read entire object - all instances
-        std::vector<uint8_t> payload;
         for (auto iid : obj->list_instances()) {
-            auto instance_data = encode_instance_tlv(obj, iid);
-            payload.insert(payload.end(), instance_data.begin(), instance_data.end());
+            for (auto rid : obj->list_resources(iid)) {
+                if (auto v = obj->read_resource(iid, rid, std::nullopt)) {
+                    entries.push_back({iid, rid, std::move(v.value())});
+                }
+            }
         }
-        response.payload = std::move(payload);
-        response.code = transport::CoapCode::Content;
-
     } else if (path.is_instance()) {
-        // Read entire instance
         if (!obj->has_instance(*path.instance_id)) {
             response.code = transport::CoapCode::NotFound;
             return response;
         }
-        response.payload = encode_instance_tlv(obj, *path.instance_id);
-        response.code = transport::CoapCode::Content;
-
+        for (auto rid : obj->list_resources(*path.instance_id)) {
+            if (auto v = obj->read_resource(*path.instance_id, rid, std::nullopt)) {
+                entries.push_back({*path.instance_id, rid, std::move(v.value())});
+            }
+        }
     } else if (path.is_resource()) {
-        // Read single resource
-        fprintf(stderr, "DEBUG: Reading resource %u from instance %u\n",
-                path.resource_id->value, path.instance_id->value);
-
-        auto result = obj->read_resource(
-            *path.instance_id,
-            *path.resource_id,
-            path.resource_instance_id
-        );
-
-        if (!result) {
-            fprintf(stderr, "DEBUG: read_resource failed: %s\n", result.error().message().data());
-            response.code = error_to_coap_code(result.error().code());
+        auto v = obj->read_resource(*path.instance_id, *path.resource_id, path.resource_instance_id);
+        if (!v) {
+            response.code = error_to_coap_code(v.error().code());
             return response;
         }
-
-        fprintf(stderr, "DEBUG: read_resource succeeded, encoding TLV\n");
-
-        auto encoded = encoder.encode_resource(*path.resource_id, result.value());
-        if (encoded) {
-            fprintf(stderr, "DEBUG: TLV encoding succeeded, payload size: %zu\n", encoded.value().size());
-            response.payload = std::move(encoded.value());
-            response.code = transport::CoapCode::Content;
-            // content_format is already set to TlvLwm2m by default
-        } else {
-            fprintf(stderr, "DEBUG: TLV encoding failed: %s\n", encoded.error().message().data());
-            response.code = transport::CoapCode::InternalServerError;
-        }
+        entries.push_back({*path.instance_id, *path.resource_id, std::move(v.value())});
     }
 
-    fprintf(stderr, "DEBUG: Returning response with code %u, payload size %zu\n",
-            static_cast<unsigned>(response.code), response.payload.size());
-
+    auto data_codec = codec::select_codec(transport::ContentFormat::TlvLwm2m);
+    auto encoded = data_codec->encode_read(path, entries);
+    if (!encoded) {
+        response.code = transport::CoapCode::InternalServerError;
+        return response;
+    }
+    response.payload = std::move(encoded.value());
+    response.content_format = data_codec->format();
+    response.code = transport::CoapCode::Content;
     return response;
 }
 
 transport::CoapResponse Client::process_write(
     const ObjectPath& path,
-    const std::vector<uint8_t>& payload
+    const std::vector<uint8_t>& payload,
+    transport::ContentFormat content_format
 ) {
     transport::CoapResponse response;
 
@@ -482,81 +458,46 @@ transport::CoapResponse Client::process_write(
         return response;
     }
 
-    codec::TlvDecoder decoder;
-    auto records = decoder.decode(payload);
+    // Object-level write creates a new instance.
+    if (path.is_object()) {
+        auto result = obj->create_instance(std::nullopt);
+        response.code = result ?
+            transport::CoapCode::Created :
+            error_to_coap_code(result.error().code());
+        return response;
+    }
+
+    auto data_codec = codec::select_codec(content_format);
+    if (!data_codec) {
+        response.code = transport::CoapCode::NotAcceptable;
+        return response;
+    }
+
+    InstanceId iid = *path.instance_id;
+    codec::TypeResolver type_of =
+        [obj, iid](ResourceId rid) { return obj->get_resource_type(iid, rid); };
+    auto records = data_codec->decode_write(payload, type_of);
     if (!records) {
         response.code = transport::CoapCode::BadRequest;
         return response;
     }
 
     if (path.is_resource()) {
-        // Write single resource
         if (records.value().empty()) {
             response.code = transport::CoapCode::BadRequest;
             return response;
         }
-
-        const auto& record = records.value()[0];
-
-        // Get expected type from object for proper TLV decoding
-        ResourceType expected_type = ResourceType::String;  // Default fallback
-        if (auto type = obj->get_resource_type(*path.instance_id, *path.resource_id)) {
-            expected_type = *type;
-        }
-
-        // Decode TLV with correct type
-        auto decoded = decoder.decode_resource(record.value, expected_type);
-        if (!decoded) {
-            response.code = transport::CoapCode::BadRequest;
-            return response;
-        }
-        ResourceValue value = decoded.value();
-
         auto result = obj->write_resource(
-            *path.instance_id,
-            *path.resource_id,
-            path.resource_instance_id,
-            value
-        );
-
+            iid, *path.resource_id, path.resource_instance_id,
+            records.value().front().value);
         response.code = result ?
             transport::CoapCode::Changed :
             error_to_coap_code(result.error().code());
-
-    } else if (path.is_instance()) {
-        // Write multiple resources in instance
-        for (const auto& record : records.value()) {
-            if (record.type == codec::TlvType::Resource) {
-                ResourceId rid{record.id};
-
-                // Get expected type for this resource
-                ResourceType expected_type = ResourceType::String;
-                if (auto type = obj->get_resource_type(*path.instance_id, rid)) {
-                    expected_type = *type;
-                }
-
-                // Decode TLV with correct type
-                auto decoded = decoder.decode_resource(record.value, expected_type);
-                if (decoded) {
-                    (void)obj->write_resource(
-                        *path.instance_id,
-                        rid,
-                        std::nullopt,
-                        decoded.value()
-                    );
-                }
-            }
+    } else {  // instance write: apply each resource record
+        for (const auto& rec : records.value()) {
+            (void)obj->write_resource(iid, rec.rid, rec.riid, rec.value);
         }
         response.code = transport::CoapCode::Changed;
-
-    } else if (path.is_object()) {
-        // Create new instance
-        auto result = obj->create_instance(std::nullopt);
-        if (result) {
-            response.code = transport::CoapCode::Created;
-        } else {
-            response.code = error_to_coap_code(result.error().code());
-        }
     }
 
     return response;
