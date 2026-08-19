@@ -13,6 +13,7 @@ add_executable(lwm2m_tests
     test_types.cpp
     test_result.cpp
     test_tlv_codec.cpp
+    test_cbor.cpp
     test_objects.cpp
 )
 
