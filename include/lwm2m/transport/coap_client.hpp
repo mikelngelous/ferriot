@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,6 +66,10 @@ enum class ContentFormat : uint16_t {
     SenmlCbor = 112,
 };
 
+// Opaque handle to an incoming CoAP session (for unsolicited notifications).
+// 0 = invalid. Maps internally to a coap_session_t* without leaking libcoap here.
+using SessionHandle = uint64_t;
+
 // CoAP request
 struct CoapRequest {
     CoapMethod method;
@@ -72,6 +77,11 @@ struct CoapRequest {
     std::vector<std::pair<uint16_t, std::vector<uint8_t>>> options;
     std::vector<uint8_t> payload;
     ContentFormat content_format = ContentFormat::TlvLwm2m;
+
+    // Observe (RFC 7641): 0 = establish, 1 = cancel; nullopt if option absent
+    std::optional<uint32_t> observe;
+    std::vector<uint8_t> token;
+    SessionHandle session = 0;
 };
 
 // CoAP response
@@ -163,6 +173,18 @@ public:
 
     // Register handler for server-initiated requests (Read, Write, Execute)
     virtual void set_request_handler(RequestHandler handler) = 0;
+
+    // Send an unsolicited notification (2.05 with Observe option) to an existing
+    // observing session, reusing the observation's token. confirmable: CON vs NON.
+    [[nodiscard]] virtual Result<void> notify(
+        SessionHandle session,
+        const std::vector<uint8_t>& token,
+        uint32_t observe_seq,
+        CoapCode code,
+        ContentFormat content_format,
+        const std::vector<uint8_t>& payload,
+        bool confirmable
+    ) = 0;
 
     // Process pending I/O (call periodically in event loop)
     virtual void poll(std::chrono::milliseconds timeout = std::chrono::milliseconds{100}) = 0;

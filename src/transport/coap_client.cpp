@@ -9,6 +9,7 @@
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace lwm2m::transport {
 
@@ -31,9 +32,24 @@ public:
     void set_request_handler(RequestHandler handler) override;
     void poll(std::chrono::milliseconds timeout) override;
 
+    Result<void> notify(
+        SessionHandle session,
+        const std::vector<uint8_t>& token,
+        uint32_t observe_seq,
+        CoapCode code,
+        ContentFormat content_format,
+        const std::vector<uint8_t>& payload,
+        bool confirmable
+    ) override;
+
 private:
     // Internal poll without locking (caller must hold io_mtx_)
     void poll_unlocked(std::chrono::milliseconds timeout);
+
+    // Opaque handle <-> session mapping for unsolicited notifications. Invalidated
+    // when the session closes so notify() can't dereference a dead pointer.
+    SessionHandle handle_for_session(coap_session_t* session);
+    void invalidate_session(coap_session_t* session);
 
     // Protects libcoap calls (not thread-safe). Recursive: connect() holds it
     // while calling disconnect().
@@ -82,6 +98,9 @@ private:
     };
     uint64_t next_token_ = 0;
     PendingResponse* current_response_ = nullptr;
+
+    std::unordered_map<SessionHandle, coap_session_t*> session_handles_;
+    SessionHandle next_session_handle_ = 0;
 };
 
 CoapClientImpl::~CoapClientImpl() {
@@ -463,6 +482,76 @@ void CoapClientImpl::set_request_handler(RequestHandler handler) {
     request_handler_ = std::move(handler);
 }
 
+SessionHandle CoapClientImpl::handle_for_session(coap_session_t* session) {
+    for (const auto& [h, s] : session_handles_) {
+        if (s == session) {
+            return h;
+        }
+    }
+    SessionHandle h = ++next_session_handle_;
+    session_handles_[h] = session;
+    return h;
+}
+
+void CoapClientImpl::invalidate_session(coap_session_t* session) {
+    for (auto it = session_handles_.begin(); it != session_handles_.end();) {
+        it = (it->second == session) ? session_handles_.erase(it) : std::next(it);
+    }
+}
+
+Result<void> CoapClientImpl::notify(
+    SessionHandle session,
+    const std::vector<uint8_t>& token,
+    uint32_t observe_seq,
+    CoapCode code,
+    ContentFormat content_format,
+    const std::vector<uint8_t>& payload,
+    bool confirmable
+) {
+    std::lock_guard<std::recursive_mutex> lock(io_mtx_);
+
+    auto it = session_handles_.find(session);
+    if (it == session_handles_.end() || it->second == nullptr) {
+        return Err<void>(ErrorCode::InvalidState, "Observe session no longer valid");
+    }
+    coap_session_t* s = it->second;
+
+    coap_pdu_t* pdu = coap_pdu_init(
+        confirmable ? COAP_MESSAGE_CON : COAP_MESSAGE_NON,
+        static_cast<coap_pdu_code_t>(code),
+        coap_new_message_id(s),
+        coap_session_max_pdu_size(s)
+    );
+    if (!pdu) {
+        return Err<void>(ErrorCode::InternalServerError, "Failed to create notification PDU");
+    }
+
+    // Reuse the observation's token (must come before options/data)
+    coap_add_token(pdu, token.size(), token.data());
+
+    // Observe (6) before Content-Format (12), 24-bit sequence
+    uint8_t obs_buf[4];
+    size_t obs_len = coap_encode_var_safe(obs_buf, sizeof(obs_buf), observe_seq & 0xFFFFFFu);
+    coap_add_option(pdu, COAP_OPTION_OBSERVE, obs_len, obs_buf);
+
+    if (!payload.empty()) {
+        uint8_t cf_buf[2];
+        size_t cf_len = coap_encode_var_safe(
+            cf_buf, sizeof(cf_buf), static_cast<uint16_t>(content_format));
+        coap_add_option(pdu, COAP_OPTION_CONTENT_FORMAT, cf_len, cf_buf);
+        if (coap_add_data(pdu, payload.size(), payload.data()) == 0) {
+            coap_delete_pdu(pdu);
+            return Err<void>(ErrorCode::InternalServerError,
+                "Notification payload does not fit in a single PDU");
+        }
+    }
+
+    if (coap_send(s, pdu) == COAP_INVALID_MID) {
+        return Err<void>(ErrorCode::Timeout, "Failed to send notification");
+    }
+    return Ok();
+}
+
 void CoapClientImpl::poll(std::chrono::milliseconds timeout) {
     std::lock_guard<std::recursive_mutex> lock(io_mtx_);
     poll_unlocked(timeout);
@@ -547,6 +636,7 @@ int CoapClientImpl::event_handler(
         case COAP_EVENT_SESSION_CLOSED:
         case COAP_EVENT_SESSION_FAILED:
             impl->connected_ = false;
+            impl->invalidate_session(session);
             break;
 
         default:
@@ -557,49 +647,32 @@ int CoapClientImpl::event_handler(
 
 void CoapClientImpl::incoming_request_handler(
     coap_resource_t* resource,
-    [[maybe_unused]] coap_session_t* session,
+    coap_session_t* session,
     const coap_pdu_t* request,
     [[maybe_unused]] const coap_string_t* query,
     coap_pdu_t* response
 ) {
-    fprintf(stderr, "DEBUG: incoming_request_handler called, request type=%u\n",
-            coap_pdu_get_type(request));
-
-    // Get our implementation from resource's userdata
     auto* impl = static_cast<CoapClientImpl*>(coap_resource_get_userdata(resource));
     if (!impl || !impl->request_handler_) {
         coap_pdu_set_code(response, COAP_RESPONSE_CODE_NOT_FOUND);
         return;
     }
 
-    // Build CoapRequest from incoming PDU
     CoapRequest coap_request;
 
-    // Extract method
-    coap_pdu_code_t pdu_code = coap_pdu_get_code(request);
-    switch (pdu_code) {
-        case COAP_REQUEST_CODE_GET:
-            coap_request.method = CoapMethod::Get;
-            break;
-        case COAP_REQUEST_CODE_POST:
-            coap_request.method = CoapMethod::Post;
-            break;
-        case COAP_REQUEST_CODE_PUT:
-            coap_request.method = CoapMethod::Put;
-            break;
-        case COAP_REQUEST_CODE_DELETE:
-            coap_request.method = CoapMethod::Delete;
-            break;
+    switch (coap_pdu_get_code(request)) {
+        case COAP_REQUEST_CODE_GET:    coap_request.method = CoapMethod::Get;    break;
+        case COAP_REQUEST_CODE_POST:   coap_request.method = CoapMethod::Post;   break;
+        case COAP_REQUEST_CODE_PUT:    coap_request.method = CoapMethod::Put;    break;
+        case COAP_REQUEST_CODE_DELETE: coap_request.method = CoapMethod::Delete; break;
         default:
             coap_pdu_set_code(response, COAP_RESPONSE_CODE_NOT_ALLOWED);
             return;
     }
 
-    // Extract URI path from options
     std::string uri_path;
     coap_opt_iterator_t opt_iter;
     coap_opt_t* option;
-
     coap_option_iterator_init(request, &opt_iter, COAP_OPT_ALL);
     while ((option = coap_option_next(&opt_iter))) {
         if (opt_iter.number == COAP_OPTION_URI_PATH) {
@@ -616,66 +689,46 @@ void CoapClientImpl::incoming_request_handler(
                     coap_decode_var_bytes(coap_opt_value(option), coap_opt_length(option))
                 );
             }
+        } else if (opt_iter.number == COAP_OPTION_OBSERVE) {
+            coap_request.observe = coap_decode_var_bytes(
+                coap_opt_value(option), coap_opt_length(option)
+            );
         }
     }
-
-    // Prepend / to path
     if (!uri_path.empty()) {
         uri_path = "/" + uri_path;
     }
     coap_request.uri_path = std::move(uri_path);
 
-    // Extract payload
+    // Token + session handle, needed to send Observe notifications later
+    coap_bin_const_t tok = coap_pdu_get_token(request);
+    if (tok.s && tok.length > 0) {
+        coap_request.token.assign(tok.s, tok.s + tok.length);
+    }
+    coap_request.session = impl->handle_for_session(session);
+
     const uint8_t* data = nullptr;
     size_t data_len = 0;
     if (coap_get_data(request, &data_len, &data) && data_len > 0) {
         coap_request.payload.assign(data, data + data_len);
     }
 
-    // Call the request handler and get response
     CoapResponse coap_response = impl->request_handler_(coap_request);
-
-    fprintf(stderr, "DEBUG: Handler returned code %u, payload size %zu\n",
-            static_cast<unsigned>(coap_response.code), coap_response.payload.size());
 
     coap_pdu_set_code(response, static_cast<coap_pdu_code_t>(coap_response.code));
 
-    // Add Content-Format option if we have payload
-    if (!coap_response.payload.empty()) {
-        uint16_t content_format = static_cast<uint16_t>(coap_response.content_format);
-        fprintf(stderr, "DEBUG: Adding Content-Format %u and %zu bytes payload\n",
-                content_format, coap_response.payload.size());
-
-        // Hex dump payload
-        fprintf(stderr, "DEBUG: Payload hex dump: ");
-        for (size_t i = 0; i < coap_response.payload.size() && i < 64; ++i) {
-            fprintf(stderr, "%02x ", coap_response.payload[i]);
-        }
-        fprintf(stderr, "\n");
-
-        // Add Content-Format option
-        uint8_t cf_buf[2];
-        size_t cf_len = coap_encode_var_safe(cf_buf, sizeof(cf_buf), content_format);
-        coap_add_option(response, COAP_OPTION_CONTENT_FORMAT, cf_len, cf_buf);
-
-        // Add payload
-        int add_result = coap_add_data(response, coap_response.payload.size(), coap_response.payload.data());
-        fprintf(stderr, "DEBUG: coap_add_data returned %d\n", add_result);
-
-        // Verify payload was added
-        const uint8_t* resp_data = nullptr;
-        size_t resp_data_len = 0;
-        if (coap_get_data(response, &resp_data_len, &resp_data)) {
-            fprintf(stderr, "DEBUG: Response PDU contains %zu bytes of payload\n", resp_data_len);
-        } else {
-            fprintf(stderr, "DEBUG: WARNING: Response PDU has no payload after coap_add_data!\n");
-        }
-    } else {
-        fprintf(stderr, "DEBUG: No payload to add\n");
+    // Response options (e.g. Observe = 6) go before Content-Format (12), ascending
+    for (const auto& [num, value] : coap_response.options) {
+        coap_add_option(response, num, value.size(), value.data());
     }
 
-    fprintf(stderr, "DEBUG: Response PDU code set to %u, type=%u\n",
-            coap_pdu_get_code(response), coap_pdu_get_type(response));
+    if (!coap_response.payload.empty()) {
+        uint8_t cf_buf[2];
+        size_t cf_len = coap_encode_var_safe(
+            cf_buf, sizeof(cf_buf), static_cast<uint16_t>(coap_response.content_format));
+        coap_add_option(response, COAP_OPTION_CONTENT_FORMAT, cf_len, cf_buf);
+        coap_add_data(response, coap_response.payload.size(), coap_response.payload.data());
+    }
 }
 
 Result<void> CoapClientImpl::setup_dtls_psk(const PskCredentials& psk) {
